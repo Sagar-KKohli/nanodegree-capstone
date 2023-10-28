@@ -132,8 +132,8 @@ workflows:
       - build-test
       - build-image:
           requires: ['build-test']
-      # - create-cluster:
-      #     requires: ['build-image']
-      - deploy-application:
-          # requires: ['create-cluster']
+      - create-cluster:
           requires: ['build-image']
+      - deploy-application:
+          requires: ['create-cluster']
+          
