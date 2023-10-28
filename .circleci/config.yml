@@ -1,0 +1,138 @@
+version: 2.1
+
+
+jobs:
+
+  build-test:
+    working_directory: ~/apps
+    docker:
+      - image: 'python:3.7.3-stretch'
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "requirements.txt" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-      
+      - run:
+          name: Install dependencies
+          command: |
+            python3 -m venv venv
+            . venv/bin/activate
+            make install
+      - run:
+          name: Lint python and dockerfile
+          command: |
+            . venv/bin/activate
+            make lint
+      - save_cache:
+          paths:
+            - ./venv
+          key: v1-dependencies-{{ checksum "requirements.txt" }}
+
+
+  build-image:
+    working_directory: ~/apps
+    docker:
+      - image: docker:20.10.21-git
+    steps:
+      - setup_remote_docker:
+          version: 20.10.18
+      - checkout
+      - run:
+          name: Build and push Docker image
+          command: |
+            docker build -t capstone .
+            docker login -u ${DOCKER_USR} -p ${DOCKER_PASSWORD}
+            docker tag capstone awslambda2023/udacitycapstone:V1.0.0
+            docker push awslambda2023/udacitycapstone:V1.0.0
+ 
+  create-cluster:
+    working_directory: ~/apps
+    docker:
+      - image: 'weaveworks/eksctl:latest'
+    steps:
+      - checkout 
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "requirements.txt" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-         
+      - run:
+          name: Create EKS Cluster
+          command: |
+            eksctl version
+            set +e
+            eksctl get cluster --name=udacity-capstone --region=us-east-1 > /tmp/cluster_status 2>&1
+            if grep -q "No cluster found for name" /tmp/cluster_status; then
+              echo "Cluster not found, starting prod cluster"
+              eksctl create cluster --name udacity-capstone --region=us-east-1 --nodegroup-name udacity-capstone-ng-1 --node-type t2.micro --nodes 2 --version 1.24 --zones us-east-1a,us-east-1b
+            elif grep -q "ACTIVE" /tmp/cluster_status; then
+              echo "Cluster is running"
+            else
+              echo "Unknown cluster status"
+              exit 1
+            fi
+      - save_cache:
+          paths:
+            - ./venv
+          key: v1-dependencies-{{ checksum "requirements.txt" }}
+
+  deploy-application:
+    docker: 
+      - image: circleci/python:3.7.3-stretch
+        user: root
+    working_directory: ~/apps
+    steps:
+      - checkout
+      - setup_remote_docker:
+            docker_layer_caching: true
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "requirements.txt" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-         
+      - run:
+          name: Deploy Docker Image to EKS Cluster
+          command: | 
+            # install some packages
+            sudo apt-get update && sudo apt-get install -y
+            sudo apt-get install -y curl unzip            
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+            sudo update-ca-certificates -v
+            echo "installed awscli"
+
+            # install kubectl
+            echo "install kubectl"
+            curl --insecure -LO "https://dl.k8s.io/release/v1.24.12/bin/linux/amd64/kubectl"
+            sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+            kubectl version --client
+            echo "installed kubectl"
+            
+            # deploy cluster
+            aws eks update-kubeconfig --name udacity-capstone
+            docker pull awslambda2023/udacitycapstone:V1.0.0
+            echo "pulled docker image and updated k8s config"
+              
+            # deploy application to k8s cluster
+            kubectl apply -f deployment.yml
+            kubectl apply -f service.yml
+            echo "deployed application to k8s cluster"
+            kubectl wait pods -n default -l run=app-deployment --for condition=Ready --timeout=240s
+            kubectl -n default get all
+            ELB_IP=$(kubectl -n default get service app-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            echo "$ELB_IP"
+            
+
+workflows:
+  default:
+    jobs:
+      - build-test
+      - build-image:
+          requires:
+            - build-test
+      - create-cluster
+      - deploy-application:
+          requires: ['build-image' , 'create-cluster']
