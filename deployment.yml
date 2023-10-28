@@ -17,8 +17,8 @@ spec:
         run: app-deployment
     spec:
       containers:
-      - name: udacity-capstone
-        image: awslambda2023/udacitycapstone:V1.0.0
+      - name: nanodegree-capstone
+        image: awslambda2023/nanodegreecapstone:V1.0.0
         ports:
         - name: http
           containerPort: 80
